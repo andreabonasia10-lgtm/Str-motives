@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { LogOut, PlayCircle, ShieldCheck, UserRound } from "lucide-react";
+import { LogOut, ShieldCheck, UserRound } from "lucide-react";
 import { Shell } from "@/components/shell";
 import { useApp } from "@/app/providers";
 import { normalizeName } from "@/lib/format";
@@ -14,11 +14,6 @@ export default function ProfilePage() {
 
   const mine = motives.filter((m) => normalizeName(m.createdBy) === me);
   const going = motives.filter((m) => m.rsvps[me] === "going");
-
-  const replayTour = () => {
-    localStorage.removeItem("str-tour-v1");
-    window.dispatchEvent(new Event("str:show-tour"));
-  };
 
   const doLogout = () => {
     logout();
@@ -53,9 +48,6 @@ export default function ProfilePage() {
       </div>
 
       <div className="mt-5 space-y-3">
-        <button onClick={replayTour} className="btn btn-soft w-full justify-start">
-          <PlayCircle size={18} /> Replay the tour
-        </button>
         <Link href="/admin" className="btn btn-soft w-full justify-start">
           <ShieldCheck size={18} /> {admin ? "Admin controls" : "Admin mode"}
         </Link>

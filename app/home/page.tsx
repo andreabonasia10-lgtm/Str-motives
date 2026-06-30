@@ -1,33 +1,21 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
 import { Plus } from "lucide-react";
 import { Shell } from "@/components/shell";
 import { MotiveCard } from "@/components/motive-card";
 import { useApp } from "@/app/providers";
-import { normalizeName } from "@/lib/format";
-
-const FILTERS = ["All", "This Week", "Pool", "Food", "Party", "Chill", "My RSVPs"];
 
 export default function HomePage() {
   const { name, motives } = useApp();
-  const [filter, setFilter] = useState("All");
-  const weekFromNow = Date.now() + 7 * 864e5;
 
-  const visible = motives
-    .filter((m) => {
-      if (filter === "All") return true;
-      if (filter === "My RSVPs") return !!m.rsvps[normalizeName(name)];
-      if (filter === "This Week") return new Date(m.date).getTime() < weekFromNow;
-      if (filter === "Food") return ["BBQ", "Dinner", "Potluck"].includes(m.category);
-      return m.category.toLowerCase().includes(filter.toLowerCase());
-    })
-    .sort((a, b) => a.date.localeCompare(b.date));
+  const visible = [...motives].sort((a, b) =>
+    (a.date + a.startTime).localeCompare(b.date + b.startTime)
+  );
 
   return (
     <Shell>
-      <header className="mb-7 flex items-start justify-between">
+      <header className="mb-6 flex items-start justify-between">
         <div>
           <p className="eyebrow">STR Motives</p>
           <h1 className="mt-2 text-3xl font-bold tracking-[-.04em]">
@@ -45,18 +33,6 @@ export default function HomePage() {
         </Link>
       </header>
 
-      <div className="scrollbar-none -mx-4 mb-5 flex gap-2 overflow-x-auto px-4 pb-1">
-        {FILTERS.map((f) => (
-          <button
-            key={f}
-            onClick={() => setFilter(f)}
-            className={`chip ${filter === f ? "active" : ""}`}
-          >
-            {f}
-          </button>
-        ))}
-      </div>
-
       <div className="space-y-4">
         {visible.map((m) => (
           <MotiveCard key={m.id} motive={m} />
@@ -66,7 +42,7 @@ export default function HomePage() {
             <h2 className="text-xl font-bold">No motives yet.</h2>
             <p className="mt-2 muted">Start the first one.</p>
             <Link href="/create" className="btn btn-primary mt-5">
-              Create Motive
+              Create motive
             </Link>
           </div>
         )}
