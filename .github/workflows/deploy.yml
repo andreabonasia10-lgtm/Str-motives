@@ -1,0 +1,41 @@
+name: Deploy to Vercel
+
+# Deploys the app to the existing `str-motives` Vercel project.
+# - Triggered automatically on push (uses the VERCEL_TOKEN repo secret if set).
+# - Can also be run on demand with a token passed in as an input, so no secret
+#   needs to be stored to get the first deploy out.
+on:
+  push:
+    branches: ["claude/str-motives-app-yj10rb"]
+  workflow_dispatch:
+    inputs:
+      vercel_token:
+        description: "Vercel token (used once, not stored)"
+        required: false
+
+env:
+  VERCEL_ORG_ID: team_RuTb0xbYPkhwEL3QengvoEjF
+  VERCEL_PROJECT_ID: prj_6BtwNw1avdqQG1QhYViSMmk3ZrVy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Deploy (production)
+        env:
+          INPUT_TOKEN: ${{ github.event.inputs.vercel_token }}
+          SECRET_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          TOKEN="${INPUT_TOKEN:-$SECRET_TOKEN}"
+          if [ -z "$TOKEN" ]; then
+            echo "No Vercel token available. Add a VERCEL_TOKEN repo secret to"
+            echo "enable automatic deploys on every push. Skipping."
+            exit 0
+          fi
+          echo "::add-mask::$TOKEN"
+          npm i -g vercel@latest
+          vercel deploy --prod --yes --token="$TOKEN"
