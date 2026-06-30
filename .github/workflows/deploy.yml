@@ -1,9 +1,9 @@
 name: Deploy to Vercel
 
-# Deploys the app to the existing `str-motives` Vercel project.
-# - Triggered automatically on push (uses the VERCEL_TOKEN repo secret if set).
-# - Can also be run on demand with a token passed in as an input, so no secret
-#   needs to be stored to get the first deploy out.
+# Deploys the app to the existing `str-motives` Vercel project and makes sure a
+# durable, shared data store is configured so motives never disappear.
+# - Triggered automatically on push (uses the VERCEL_TOKEN repo secret).
+# - Can also be run on demand with a token passed in as an input.
 on:
   push:
     branches: ["claude/str-motives-app-yj10rb"]
@@ -16,6 +16,8 @@ on:
 env:
   VERCEL_ORG_ID: team_RuTb0xbYPkhwEL3QengvoEjF
   VERCEL_PROJECT_ID: prj_6BtwNw1avdqQG1QhYViSMmk3ZrVy
+  API: https://api.vercel.com
+  SITE: https://str-motives.vercel.app
 
 jobs:
   deploy:
@@ -25,17 +27,61 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Deploy (production)
+
+      - name: Ensure durable store, deploy, verify
         env:
           INPUT_TOKEN: ${{ github.event.inputs.vercel_token }}
           SECRET_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
+          set -e
           TOKEN="${INPUT_TOKEN:-$SECRET_TOKEN}"
           if [ -z "$TOKEN" ]; then
-            echo "No Vercel token available. Add a VERCEL_TOKEN repo secret to"
-            echo "enable automatic deploys on every push. Skipping."
+            echo "No Vercel token available. Add a VERCEL_TOKEN repo secret to deploy. Skipping."
             exit 0
           fi
           echo "::add-mask::$TOKEN"
+
+          AUTH="Authorization: Bearer $TOKEN"
+          Q="teamId=$VERCEL_ORG_ID"
+
+          # 1) Make sure a persistent JSON store URL is set on the project.
+          ENVJSON=$(curl -s "$API/v9/projects/$VERCEL_PROJECT_ID/env?$Q&decrypt=true" -H "$AUTH")
+          LOC=$(echo "$ENVJSON" | jq -r '.envs[]? | select(.key=="STATE_BLOB_URL") | .value' | head -n1)
+
+          if [ -n "$LOC" ] && [ "$LOC" != "null" ]; then
+            echo "::add-mask::$LOC"
+            echo "Durable store already configured."
+          else
+            echo "Provisioning a persistent store..."
+            LOC=$(curl -s -D - -o /dev/null -X POST https://jsonblob.com/api/jsonBlob \
+              -H "Content-Type: application/json" -H "Accept: application/json" \
+              -d '{"motives":[],"ideas":[],"friends":[]}' \
+              | awk 'BEGIN{IGNORECASE=1}/^location:/{print $2}' | tr -d '\r')
+            echo "::add-mask::$LOC"
+            if [ -z "$LOC" ]; then echo "Failed to create store"; exit 1; fi
+            curl -s -X POST "$API/v10/projects/$VERCEL_PROJECT_ID/env?$Q" -H "$AUTH" \
+              -H "Content-Type: application/json" \
+              -d "{\"key\":\"STATE_BLOB_URL\",\"value\":\"$LOC\",\"type\":\"plain\",\"target\":[\"production\",\"preview\",\"development\"]}" \
+              -o /dev/null -w "set STATE_BLOB_URL -> http %{http_code}\n"
+            echo "Persistent store provisioned."
+          fi
+
+          # 2) Deploy (the deployment now inherits STATE_BLOB_URL).
           npm i -g vercel@latest
           vercel deploy --prod --yes --token="$TOKEN"
+
+          # 3) Verify durability: write through the live API, confirm it landed in
+          #    the persistent store, then clean up.
+          echo "Verifying persistence..."
+          sleep 8
+          HC='{"type":"createMotive","motive":{"id":"__healthcheck__","title":"hc","category":"","location":"","date":"2026-01-01","startTime":"00:00","createdBy":"hc","createdAt":"2026-01-01T00:00:00Z","bringItems":[],"rsvps":{},"votes":{},"suggestions":[]}}'
+          curl -s -X POST "$SITE/api/mutate" -H 'content-type: application/json' -d "$HC" -o /dev/null -w "  write http %{http_code}\n"
+          sleep 2
+          if curl -s "$LOC" -H "Accept: application/json" | grep -q "__healthcheck__"; then
+            echo "  PERSISTENCE OK — data is written to the durable store."
+          else
+            echo "  WARNING: healthcheck not found in persistent store."
+          fi
+          # cleanup
+          curl -s -X POST "$SITE/api/mutate" -H 'content-type: application/json' \
+            -d '{"type":"deleteMotive","id":"__healthcheck__"}' -o /dev/null -w "  cleanup http %{http_code}\n"
