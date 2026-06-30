@@ -44,27 +44,32 @@ jobs:
           AUTH="Authorization: Bearer $TOKEN"
           Q="teamId=$VERCEL_ORG_ID"
 
-          # 1) Make sure a persistent JSON store URL is set on the project.
+          # 1) Make sure a persistent JSON store URL is set on the project, as a
+          #    clean ABSOLUTE url (jsonblob returns a relative Location header).
           ENVJSON=$(curl -s "$API/v9/projects/$VERCEL_PROJECT_ID/env?$Q&decrypt=true" -H "$AUTH")
-          LOC=$(echo "$ENVJSON" | jq -r '.envs[]? | select(.key=="STATE_BLOB_URL") | .value' | head -n1)
+          RAW=$(echo "$ENVJSON" | jq -r '.envs[]? | select(.key=="STATE_BLOB_URL") | .value' | head -n1)
 
-          if [ -n "$LOC" ] && [ "$LOC" != "null" ]; then
-            echo "::add-mask::$LOC"
-            echo "Durable store already configured."
-          else
+          if [ -z "$RAW" ] || [ "$RAW" = "null" ]; then
             echo "Provisioning a persistent store..."
-            LOC=$(curl -s -D - -o /dev/null -X POST https://jsonblob.com/api/jsonBlob \
+            RAW=$(curl -s -D - -o /dev/null -X POST https://jsonblob.com/api/jsonBlob \
               -H "Content-Type: application/json" -H "Accept: application/json" \
               -d '{"motives":[],"ideas":[],"friends":[]}' \
-              | awk 'BEGIN{IGNORECASE=1}/^location:/{print $2}' | tr -d '\r')
-            echo "::add-mask::$LOC"
-            if [ -z "$LOC" ]; then echo "Failed to create store"; exit 1; fi
-            curl -s -X POST "$API/v10/projects/$VERCEL_PROJECT_ID/env?$Q" -H "$AUTH" \
-              -H "Content-Type: application/json" \
-              -d "{\"key\":\"STATE_BLOB_URL\",\"value\":\"$LOC\",\"type\":\"plain\",\"target\":[\"production\",\"preview\",\"development\"]}" \
-              -o /dev/null -w "set STATE_BLOB_URL -> http %{http_code}\n"
-            echo "Persistent store provisioned."
+              | awk 'BEGIN{IGNORECASE=1}/^location:/{print $2}')
           fi
+
+          # Reduce to the blob id (last path segment) and rebuild a canonical URL.
+          BLOB_ID=$(printf '%s' "$RAW" | tr -d ' \r\n' | sed 's#.*/##')
+          if [ -z "$BLOB_ID" ]; then echo "Failed to resolve store id"; exit 1; fi
+          LOC="https://jsonblob.com/api/jsonBlob/$BLOB_ID"
+          echo "::add-mask::$LOC"
+          echo "::add-mask::$BLOB_ID"
+
+          # Upsert the env var so it always holds the correct absolute URL.
+          curl -s -X POST "$API/v10/projects/$VERCEL_PROJECT_ID/env?$Q&upsert=true" -H "$AUTH" \
+            -H "Content-Type: application/json" \
+            -d "{\"key\":\"STATE_BLOB_URL\",\"value\":\"$LOC\",\"type\":\"plain\",\"target\":[\"production\",\"preview\",\"development\"]}" \
+            -o /dev/null -w "set STATE_BLOB_URL -> http %{http_code}\n"
+          echo "Persistent store ready."
 
           # 2) Deploy (the deployment now inherits STATE_BLOB_URL).
           npm i -g vercel@latest
