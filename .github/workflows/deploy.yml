@@ -70,13 +70,13 @@ jobs:
           npm i -g vercel@latest
           vercel deploy --prod --yes --token="$TOKEN"
 
-          # 3) Verify durability: write through the live API, confirm it landed in
-          #    the persistent store, then clean up.
+          # 3) Verify durability.
           echo "Verifying persistence..."
-          sleep 8
+          sleep 20
+          echo "  health: $(curl -s "$SITE/api/health")"
           HC='{"type":"createMotive","motive":{"id":"__healthcheck__","title":"hc","category":"","location":"","date":"2026-01-01","startTime":"00:00","createdBy":"hc","createdAt":"2026-01-01T00:00:00Z","bringItems":[],"rsvps":{},"votes":{},"suggestions":[]}}'
           curl -s -X POST "$SITE/api/mutate" -H 'content-type: application/json' -d "$HC" -o /dev/null -w "  write http %{http_code}\n"
-          sleep 2
+          sleep 3
           if curl -s "$LOC" -H "Accept: application/json" | grep -q "__healthcheck__"; then
             echo "  PERSISTENCE OK — data is written to the durable store."
           else
