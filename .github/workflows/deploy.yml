@@ -44,34 +44,60 @@ jobs:
           AUTH="Authorization: Bearer $TOKEN"
           Q="teamId=$VERCEL_ORG_ID"
 
-          # 1) Ensure a durable Vercel Blob store token is on the project.
+          # Mask any blob token that appears in a string, before it is printed.
+          maskblob() { printf '%s' "$1" | grep -oE 'vercel_blob_rw_[A-Za-z0-9_-]+' | while read -r t; do echo "::add-mask::$t"; done; }
+          getblobtoken() { printf '%s' "$1" | grep -oE 'vercel_blob_rw_[A-Za-z0-9_-]+' | head -n1; }
+
+          # 1) Ensure a durable Vercel Blob store is connected to the project so
+          #    BLOB_READ_WRITE_TOKEN is present on it.
           ENVJSON=$(curl -s "$API/v9/projects/$VERCEL_PROJECT_ID/env?$Q" -H "$AUTH")
           HASBLOB=$(echo "$ENVJSON" | jq -r '.envs[]? | select(.key=="BLOB_READ_WRITE_TOKEN") | .key' | head -n1)
 
-          if [ -z "$HASBLOB" ] || [ "$HASBLOB" = "null" ]; then
+          if [ -n "$HASBLOB" ] && [ "$HASBLOB" != "null" ]; then
+            echo "Blob store already configured."
+          else
             echo "Creating a Vercel Blob store..."
             RAW=$(curl -s -w $'\n%{http_code}' -X POST "$API/v1/storage/stores/blob?$Q" \
               -H "$AUTH" -H "Content-Type: application/json" -d '{"name":"str-motives-state"}')
             CODE=$(printf '%s' "$RAW" | tail -n1); BODY=$(printf '%s' "$RAW" | sed '$d')
-            if [ "$CODE" != "200" ] && [ "$CODE" != "201" ]; then
-              RAW=$(curl -s -w $'\n%{http_code}' -X POST "$API/v1/storage/stores?$Q" \
-                -H "$AUTH" -H "Content-Type: application/json" -d '{"type":"blob","name":"str-motives-state"}')
-              CODE=$(printf '%s' "$RAW" | tail -n1); BODY=$(printf '%s' "$RAW" | sed '$d')
-            fi
+            maskblob "$BODY"
             echo "  store create http $CODE"
-            BLOB_TOKEN=$(printf '%s' "$BODY" | jq -r '.. | strings? | select(startswith("vercel_blob_rw_"))' | head -n1)
-            echo "::add-mask::$BLOB_TOKEN"
-            if [ -z "$BLOB_TOKEN" ] || [ "$BLOB_TOKEN" = "null" ]; then
-              echo "  Could not obtain a blob token. Response keys: $(printf '%s' "$BODY" | jq -r 'if type==\"object\" then (keys|join(\",\")) else type end' 2>/dev/null)"
-              exit 1
+            echo "  store body: $BODY"
+            STORE_ID=$(printf '%s' "$BODY" | jq -r '[.. | objects | .id? // empty] | map(select(startswith("store_"))) | .[0] // (.store.id? // .id? // empty)' 2>/dev/null)
+            [ -z "$STORE_ID" ] && STORE_ID=$(printf '%s' "$BODY" | grep -oE 'store_[A-Za-z0-9]+' | head -n1)
+            echo "  store id: $STORE_ID"
+
+            BLOB_TOKEN=$(getblobtoken "$BODY")
+
+            # If the create response didn't include a token, connect the store to
+            # the project — that generates BLOB_READ_WRITE_TOKEN on the project.
+            if [ -z "$BLOB_TOKEN" ] && [ -n "$STORE_ID" ]; then
+              CRAW=$(curl -s -w $'\n%{http_code}' -X POST "$API/v1/storage/stores/$STORE_ID/connections?$Q" \
+                -H "$AUTH" -H "Content-Type: application/json" \
+                -d "{\"projectId\":\"$VERCEL_PROJECT_ID\",\"environments\":[\"production\",\"preview\",\"development\"]}")
+              CCODE=$(printf '%s' "$CRAW" | tail -n1); CBODY=$(printf '%s' "$CRAW" | sed '$d')
+              maskblob "$CBODY"
+              echo "  connect http $CCODE"
+              echo "  connect body: $CBODY"
+              BLOB_TOKEN=$(getblobtoken "$CBODY")
             fi
-            curl -s -X POST "$API/v10/projects/$VERCEL_PROJECT_ID/env?$Q&upsert=true" -H "$AUTH" \
-              -H "Content-Type: application/json" \
-              -d "{\"key\":\"BLOB_READ_WRITE_TOKEN\",\"value\":\"$BLOB_TOKEN\",\"type\":\"encrypted\",\"target\":[\"production\",\"preview\",\"development\"]}" \
-              -o /dev/null -w "  set BLOB_READ_WRITE_TOKEN -> http %{http_code}\n"
-            echo "Blob store provisioned."
-          else
-            echo "Blob store already configured."
+
+            if [ -n "$BLOB_TOKEN" ]; then
+              echo "::add-mask::$BLOB_TOKEN"
+              curl -s -X POST "$API/v10/projects/$VERCEL_PROJECT_ID/env?$Q&upsert=true" -H "$AUTH" \
+                -H "Content-Type: application/json" \
+                -d "{\"key\":\"BLOB_READ_WRITE_TOKEN\",\"value\":\"$BLOB_TOKEN\",\"type\":\"encrypted\",\"target\":[\"production\",\"preview\",\"development\"]}" \
+                -o /dev/null -w "  set BLOB_READ_WRITE_TOKEN -> http %{http_code}\n"
+              echo "Blob store provisioned."
+            else
+              # Re-check: connecting may have created the env var directly.
+              RECHK=$(curl -s "$API/v9/projects/$VERCEL_PROJECT_ID/env?$Q" -H "$AUTH" | jq -r '.envs[]? | select(.key=="BLOB_READ_WRITE_TOKEN") | .key' | head -n1)
+              if [ -n "$RECHK" ] && [ "$RECHK" != "null" ]; then
+                echo "Blob token created on project by the connection."
+              else
+                echo "  Could not obtain a blob token (see bodies above). Continuing; app will report via /api/health."
+              fi
+            fi
           fi
 
           # 2) Deploy (the deployment inherits BLOB_READ_WRITE_TOKEN).
