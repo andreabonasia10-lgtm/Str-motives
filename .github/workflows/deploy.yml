@@ -44,49 +44,48 @@ jobs:
           AUTH="Authorization: Bearer $TOKEN"
           Q="teamId=$VERCEL_ORG_ID"
 
-          # 1) Make sure a persistent JSON store URL is set on the project, as a
-          #    clean ABSOLUTE url (jsonblob returns a relative Location header).
-          ENVJSON=$(curl -s "$API/v9/projects/$VERCEL_PROJECT_ID/env?$Q&decrypt=true" -H "$AUTH")
-          RAW=$(echo "$ENVJSON" | jq -r '.envs[]? | select(.key=="STATE_BLOB_URL") | .value' | head -n1)
+          # 1) Ensure a durable Vercel Blob store token is on the project.
+          ENVJSON=$(curl -s "$API/v9/projects/$VERCEL_PROJECT_ID/env?$Q" -H "$AUTH")
+          HASBLOB=$(echo "$ENVJSON" | jq -r '.envs[]? | select(.key=="BLOB_READ_WRITE_TOKEN") | .key' | head -n1)
 
-          if [ -z "$RAW" ] || [ "$RAW" = "null" ]; then
-            echo "Provisioning a persistent store..."
-            RAW=$(curl -s -D - -o /dev/null -X POST https://jsonblob.com/api/jsonBlob \
-              -H "Content-Type: application/json" -H "Accept: application/json" \
-              -d '{"motives":[],"ideas":[],"friends":[]}' \
-              | awk 'BEGIN{IGNORECASE=1}/^location:/{print $2}')
+          if [ -z "$HASBLOB" ] || [ "$HASBLOB" = "null" ]; then
+            echo "Creating a Vercel Blob store..."
+            RAW=$(curl -s -w $'\n%{http_code}' -X POST "$API/v1/storage/stores/blob?$Q" \
+              -H "$AUTH" -H "Content-Type: application/json" -d '{"name":"str-motives-state"}')
+            CODE=$(printf '%s' "$RAW" | tail -n1); BODY=$(printf '%s' "$RAW" | sed '$d')
+            if [ "$CODE" != "200" ] && [ "$CODE" != "201" ]; then
+              RAW=$(curl -s -w $'\n%{http_code}' -X POST "$API/v1/storage/stores?$Q" \
+                -H "$AUTH" -H "Content-Type: application/json" -d '{"type":"blob","name":"str-motives-state"}')
+              CODE=$(printf '%s' "$RAW" | tail -n1); BODY=$(printf '%s' "$RAW" | sed '$d')
+            fi
+            echo "  store create http $CODE"
+            BLOB_TOKEN=$(printf '%s' "$BODY" | jq -r '.. | strings? | select(startswith("vercel_blob_rw_"))' | head -n1)
+            echo "::add-mask::$BLOB_TOKEN"
+            if [ -z "$BLOB_TOKEN" ] || [ "$BLOB_TOKEN" = "null" ]; then
+              echo "  Could not obtain a blob token. Response keys: $(printf '%s' "$BODY" | jq -r 'if type==\"object\" then (keys|join(\",\")) else type end' 2>/dev/null)"
+              exit 1
+            fi
+            curl -s -X POST "$API/v10/projects/$VERCEL_PROJECT_ID/env?$Q&upsert=true" -H "$AUTH" \
+              -H "Content-Type: application/json" \
+              -d "{\"key\":\"BLOB_READ_WRITE_TOKEN\",\"value\":\"$BLOB_TOKEN\",\"type\":\"encrypted\",\"target\":[\"production\",\"preview\",\"development\"]}" \
+              -o /dev/null -w "  set BLOB_READ_WRITE_TOKEN -> http %{http_code}\n"
+            echo "Blob store provisioned."
+          else
+            echo "Blob store already configured."
           fi
 
-          # Reduce to the blob id (last path segment) and rebuild a canonical URL.
-          BLOB_ID=$(printf '%s' "$RAW" | tr -d ' \r\n' | sed 's#.*/##')
-          if [ -z "$BLOB_ID" ]; then echo "Failed to resolve store id"; exit 1; fi
-          LOC="https://jsonblob.com/api/jsonBlob/$BLOB_ID"
-          echo "::add-mask::$LOC"
-          echo "::add-mask::$BLOB_ID"
-
-          # Upsert the env var so it always holds the correct absolute URL.
-          curl -s -X POST "$API/v10/projects/$VERCEL_PROJECT_ID/env?$Q&upsert=true" -H "$AUTH" \
-            -H "Content-Type: application/json" \
-            -d "{\"key\":\"STATE_BLOB_URL\",\"value\":\"$LOC\",\"type\":\"plain\",\"target\":[\"production\",\"preview\",\"development\"]}" \
-            -o /dev/null -w "set STATE_BLOB_URL -> http %{http_code}\n"
-          echo "Persistent store ready."
-
-          # 2) Deploy (the deployment now inherits STATE_BLOB_URL).
+          # 2) Deploy (the deployment inherits BLOB_READ_WRITE_TOKEN).
           npm i -g vercel@latest
           vercel deploy --prod --yes --token="$TOKEN"
 
-          # 3) Verify durability.
+          # 3) Verify durability via the health endpoint (independent read + write
+          #    against the durable Blob store).
           echo "Verifying persistence..."
           sleep 20
-          echo "  health: $(curl -s "$SITE/api/health")"
-          HC='{"type":"createMotive","motive":{"id":"__healthcheck__","title":"hc","category":"","location":"","date":"2026-01-01","startTime":"00:00","createdBy":"hc","createdAt":"2026-01-01T00:00:00Z","bringItems":[],"rsvps":{},"votes":{},"suggestions":[]}}'
-          curl -s -X POST "$SITE/api/mutate" -H 'content-type: application/json' -d "$HC" -o /dev/null -w "  write http %{http_code}\n"
-          sleep 3
-          if curl -s "$LOC" -H "Accept: application/json" | grep -q "__healthcheck__"; then
-            echo "  PERSISTENCE OK — data is written to the durable store."
+          HEALTH=$(curl -s "$SITE/api/health")
+          echo "  health: $HEALTH"
+          if echo "$HEALTH" | grep -q '"readable":true' && echo "$HEALTH" | grep -q '"writable":true'; then
+            echo "  PERSISTENCE OK — durable Blob store is readable and writable."
           else
-            echo "  WARNING: healthcheck not found in persistent store."
+            echo "  WARNING: durable store is not fully working."
           fi
-          # cleanup
-          curl -s -X POST "$SITE/api/mutate" -H 'content-type: application/json' \
-            -d '{"type":"deleteMotive","id":"__healthcheck__"}' -o /dev/null -w "  cleanup http %{http_code}\n"
