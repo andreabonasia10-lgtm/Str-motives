@@ -54,6 +54,13 @@ export interface AppState {
   motives: Motive[];
   ideas: Idea[];
   friends: string[];
+  /** normalized name -> last-seen timestamp (ms). Drives "Online now". */
+  presence: Record<string, number>;
 }
 
-export const emptyState = (): AppState => ({ motives: [], ideas: [], friends: [] });
+export const emptyState = (): AppState => ({
+  motives: [],
+  ideas: [],
+  friends: [],
+  presence: {},
+});

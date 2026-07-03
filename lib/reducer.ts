@@ -19,7 +19,8 @@ export type Action =
   | { type: "createIdea"; idea: Idea }
   | { type: "voteIdea"; id: string; actor: string; value: number }
   | { type: "addFriend"; name: string }
-  | { type: "removeFriend"; name: string };
+  | { type: "removeFriend"; name: string }
+  | { type: "ping"; actor: string; at: number };
 
 const mapMotive = (
   state: AppState,
@@ -113,6 +114,15 @@ export function applyAction(state: AppState, action: Action): AppState {
           (f) => normalizeName(f) !== normalizeName(action.name)
         ),
       };
+
+    case "ping": {
+      const who = normalizeName(action.actor);
+      if (!who) return state;
+      return {
+        ...state,
+        presence: { ...state.presence, [who]: action.at },
+      };
+    }
 
     default:
       return state;

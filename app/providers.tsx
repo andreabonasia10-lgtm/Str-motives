@@ -32,6 +32,8 @@ interface AppApi {
   motives: Motive[];
   ideas: Idea[];
   friends: string[];
+  /** People seen in the last minute, normalized names, self included. */
+  online: string[];
   setName: (name: string) => void;
   logout: () => void;
   setAdmin: (v: boolean) => void;
@@ -52,6 +54,8 @@ interface AppApi {
 const Ctx = createContext<AppApi | null>(null);
 
 const POLL_MS = 4000;
+const PING_MS = 25000;
+const ONLINE_WINDOW_MS = 65000;
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
@@ -112,6 +116,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  // Presence heartbeat: tell the server we're here so friends see us online.
+  useEffect(() => {
+    if (!ready || !name) return;
+    const ping = () => dispatch({ type: "ping", actor: name, at: Date.now() });
+    ping();
+    const t = setInterval(ping, PING_MS);
+    return () => clearInterval(t);
+  }, [ready, name, dispatch]);
+
   const setName = useCallback(
     (raw: string) => {
       const clean = raw.trim().replace(/\s+/g, " ");
@@ -166,14 +179,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [dispatch, name]
   );
 
-  const api: AppApi = useMemo(
-    () => ({
+  const api: AppApi = useMemo(() => {
+    const cutoff = Date.now() - ONLINE_WINDOW_MS;
+    const online = Object.entries(state.presence || {})
+      .filter(([, at]) => at > cutoff)
+      .map(([who]) => who)
+      .sort();
+    return {
       ready,
       name,
       admin,
       motives: state.motives,
       ideas: state.ideas,
       friends: state.friends,
+      online,
       setName,
       logout,
       setAdmin,
@@ -195,9 +214,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       voteIdea: (id, value) => dispatch({ type: "voteIdea", id, actor: name, value }),
       addFriend: (n) => dispatch({ type: "addFriend", name: n }),
       removeFriend: (n) => dispatch({ type: "removeFriend", name: n }),
-    }),
-    [ready, name, admin, state, setName, logout, setAdmin, createMotive, createIdea, dispatch]
-  );
+    };
+  }, [ready, name, admin, state, setName, logout, setAdmin, createMotive, createIdea, dispatch]);
 
   return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
 }
